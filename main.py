@@ -31,6 +31,9 @@ if __name__ == "__main__":
         if n % params["print_every"] == 0:
             print(f"Iter {n}/{params['nt']}")
 
-    np.savez("historial_flujo.npz", u_hist=np.array(u_hist), v_hist=np.array(v_hist),
-             Lx=params["Lx"], Ly=params["Ly"], dt=params["dt"])
+    np.savez("historial_flujo.npz",
+         u_hist=np.array(u_hist), v_hist=np.array(v_hist),
+         Lx=params["Lx"], Ly=params["Ly"], dt=params["dt"],
+         nx=params["nx"], ny=params["ny"])
+
     print("✅ Estados guardados en historial_flujo.npz")

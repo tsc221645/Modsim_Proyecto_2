@@ -1,15 +1,14 @@
 import numpy as np
 from physics import build_rhs
 
-# ---------------------- Forzamientos ----------------------
+# forcing_field (mantengo tu lógica pero con pequeñas garantías)
 def forcing_field(params, t, ny, nx, dx, dy):
-    """Genera campos de fuerza Fx, Fy según el escenario."""
     Fx_field = np.zeros((ny, nx))
     Fy_field = np.zeros((ny, nx))
     sc = params.get("scenario", "poiseuille")
 
     if sc == "poiseuille":
-        Fx_field[:] = params["Fx"]
+        Fx_field[:] = params.get("Fx", 0.0)
 
     elif sc == "oscillatory_force":
         F0, f = params["F0"], params["freq"]
@@ -23,82 +22,127 @@ def forcing_field(params, t, ny, nx, dx, dy):
         s = params["jet_sigma"]
         G = np.exp(-((X - x0) ** 2 + (Y - y0) ** 2) / (2 * s * s))
         amp = params["jet_strength"]
-        if params["jet_axis"] == "x":
+        if params.get("jet_axis", "x") == "x":
             Fx_field = amp * G
         else:
             Fy_field = amp * G
 
     return Fx_field, Fy_field
 
+def pressure_poisson(p, b, dx, dy, nit=1000, tol=1e-6):
+    """Solución iterativa de Poisson (Jacobi) sobre interior con BC de Neumann (gradiente = 0)."""
+    pn = p.copy()
+    ny, nx = p.shape
+    dx2 = dx*dx; dy2 = dy*dy
+    denom = 2*(dx2 + dy2)
 
-# ---------------------- Poisson Solver ----------------------
-def pressure_poisson(p, b, dx, dy, nit):
-    pn = np.empty_like(p)
-    for _ in range(nit):
-        pn[:] = p[:]
-        p = (
-            ((np.roll(pn, -1, axis=1) + np.roll(pn, 1, axis=1)) * dy**2
-             + (np.roll(pn, -1, axis=0) + np.roll(pn, 1, axis=0)) * dx**2
-             - b * dx**2 * dy**2)
-            / (2 * (dx**2 + dy**2))
-        )
-        p[:, 0], p[:, -1] = p[:, -2], p[:, 1]
-        p[0, :], p[-1, :] = p[1, :], p[-2, :]
+    for it in range(nit):
+        pn[1:-1,1:-1] = (
+            (pn[1:-1,2:] + pn[1:-1,:-2]) * dy2 +
+            (pn[2:,1:-1] + pn[:-2,1:-1]) * dx2 -
+            b[1:-1,1:-1] * dx2 * dy2
+        ) / denom
+
+        # Neumann BC: dp/dn = 0 -> set boundary equal to adjacent interior
+        pn[:,0] = pn[:,1]
+        pn[:,-1] = pn[:,-2]
+        pn[0,:] = pn[1,:]
+        pn[-1,:] = pn[-2,:]
+
+        # residuo simple para criterio de corte (L_inf)
+        res = np.max(np.abs(pn[1:-1,1:-1] - p[1:-1,1:-1]))
+        p[:] = pn
+        if res < tol:
+            break
+    # devuelve p y número de iteraciones (si quieres)
     return p
 
+def step_navier_stokes(u, v, p, dx, dy, dt, rho, nu, Fx_field=None, Fy_field=None):
+    """Avanza un paso de tiempo (explícito) con condiciones de contorno no deslizantes en top/bottom."""
+    if Fx_field is None:
+        Fx_field = np.zeros_like(u)
+    if Fy_field is None:
+        Fy_field = np.zeros_like(v)
 
-# ---------------------- Paso de Navier-Stokes ----------------------
-def step_navier_stokes(u, v, p, dx, dy, dt, rho, nu, Fx_field, Fy_field):
-    un, vn = u.copy(), v.copy()
+    un = u.copy()
+    vn = v.copy()
 
-    dudx = (np.roll(un, -1, axis=1) - np.roll(un, 1, axis=1)) / (2 * dx)
-    dudy = (np.roll(un, -1, axis=0) - np.roll(un, 1, axis=0)) / (2 * dy)
-    dvdx = (np.roll(vn, -1, axis=1) - np.roll(vn, 1, axis=1)) / (2 * dx)
-    dvdy = (np.roll(vn, -1, axis=0) - np.roll(vn, 1, axis=0)) / (2 * dy)
+    # difusivo (segunda derivada) e convectivo (centrado)
+    # interior indices
+    i0, i1 = 1, -1
+    j0, j1 = 1, -1
 
-    d2udx2 = (np.roll(un, -1, axis=1) - 2 * un + np.roll(un, 1, axis=1)) / dx**2
-    d2udy2 = (np.roll(un, -1, axis=0) - 2 * un + np.roll(un, 1, axis=0)) / dy**2
-    d2vdx2 = (np.roll(vn, -1, axis=1) - 2 * vn + np.roll(vn, 1, axis=1)) / dx**2
-    d2vdy2 = (np.roll(vn, -1, axis=0) - 2 * vn + np.roll(vn, 1, axis=0)) / dy**2
+    # derivadas centradas en interior
+    dudx = (un[1:-1,2:] - un[1:-1,:-2]) / (2*dx)
+    dudy = (un[2:,1:-1] - un[:-2,1:-1]) / (2*dy)
+    dvdx = (vn[1:-1,2:] - vn[1:-1,:-2]) / (2*dx)
+    dvdy = (vn[2:,1:-1] - vn[:-2,1:-1]) / (2*dy)
 
-    dpdx = (np.roll(p, -1, axis=1) - np.roll(p, 1, axis=1)) / (2 * dx)
-    dpdy = (np.roll(p, -1, axis=0) - np.roll(p, 1, axis=0)) / (2 * dy)
+    d2udx2 = (un[1:-1,2:] - 2*un[1:-1,1:-1] + un[1:-1,:-2]) / dx**2
+    d2udy2 = (un[2:,1:-1] - 2*un[1:-1,1:-1] + un[:-2,1:-1]) / dy**2
+    d2vdx2 = (vn[1:-1,2:] - 2*vn[1:-1,1:-1] + vn[1:-1,:-2]) / dx**2
+    d2vdy2 = (vn[2:,1:-1] - 2*vn[1:-1,1:-1] + vn[:-2,1:-1]) / dy**2
 
-    u_new = (
-        un - dt * (un * dudx + vn * dudy)
-        - dt / rho * dpdx + nu * dt * (d2udx2 + d2udy2)
-        + dt * Fx_field
+    dpdx = (p[1:-1,2:] - p[1:-1,:-2]) / (2*dx)
+    dpdy = (p[2:,1:-1] - p[:-2,1:-1]) / (2*dy)
+
+    u_new = un.copy()
+    v_new = vn.copy()
+
+    u_new[1:-1,1:-1] = (
+        un[1:-1,1:-1] 
+        - dt*(un[1:-1,1:-1]*dudx + vn[1:-1,1:-1]*dudy)
+        - dt/rho * dpdx
+        + nu*dt*(d2udx2 + d2udy2)
+        + dt*Fx_field[1:-1,1:-1]
     )
-    v_new = (
-        vn - dt * (un * dvdx + vn * dvdy)
-        - dt / rho * dpdy + nu * dt * (d2vdx2 + d2vdy2)
-        + dt * Fy_field
+
+    v_new[1:-1,1:-1] = (
+        vn[1:-1,1:-1]
+        - dt*(un[1:-1,1:-1]*dvdx + vn[1:-1,1:-1]*dvdy)
+        - dt/rho * dpdy
+        + nu*dt*(d2vdx2 + d2vdy2)
+        + dt*Fy_field[1:-1,1:-1]
     )
 
-    u_new[0, :], u_new[-1, :] = 0.0, 0.0
-    v_new[0, :], v_new[-1, :] = 0.0, 0.0
+    # Condiciones de frontera sencillas:
+    # No-slip en paredes superior e inferior (y=0 y y=Ly)
+    u_new[0,:] = 0.0
+    u_new[-1,:] = 0.0
+    v_new[0,:] = 0.0
+    v_new[-1,:] = 0.0
+
+    # Para left/right podemos usar Neumann (du/dx = 0) -> copiar valor interior
+    u_new[:,0] = u_new[:,1]
+    u_new[:,-1] = u_new[:,-2]
+    v_new[:,0] = v_new[:,1]
+    v_new[:,-1] = v_new[:,-2]
+
     return u_new, v_new
 
-
-# ---------------------- Condiciones especiales ----------------------
-def apply_special_bcs(u, v, params, dx, dy):
+def apply_special_bcs(u, v, params):
+    """Aplica condiciones especiales según escenario (mutates u,v)."""
     sc = params.get("scenario", "poiseuille")
-
     if sc == "lid_cavity":
-        v[-1, :] = 0.0
-        u[-1, :] = params["U_lid"]
-
-    if sc == "cylinder":
-        x = np.linspace(0, params["Lx"], params["nx"])
-        y = np.linspace(0, params["Ly"], params["ny"])
+        # top lid moving
+        u[-1,:] = params.get("U_lid", 1.0)
+        v[-1,:] = 0.0
+        u[0,:] = 0.0
+        v[0,:] = 0.0
+    elif sc == "cylinder":
+        nx, ny = params["nx"], params["ny"]
+        x = np.linspace(0, params["Lx"], nx)
+        y = np.linspace(0, params["Ly"], ny)
         X, Y = np.meshgrid(x, y)
         xc, yc = params["cyl_center"]
         r = params["cyl_radius"]
         mask = (X - xc) ** 2 + (Y - yc) ** 2 <= r ** 2
-        u[mask], v[mask] = 0.0, 0.0
+        u[mask] = 0.0
+        v[mask] = 0.0
+    # si hay más escenarios, agrégalos aquí
 
 
-# ---------------------- Simulación principal ----------------------
+# ----- Simulación principal -----
 def simulate_flow(params):
     nx, ny = params["nx"], params["ny"]
     dx, dy = params["dx"], params["dy"]
