@@ -1,9 +1,9 @@
 import numpy as np
-data = np.load("resultados.npz")
 
-u = data["u"]
-v = data["v"]
-p = data["p"]
+data = np.load("historial_flujo.npz")
 
-print("Tamaño de u:", u.shape)
-print("Velocidad máxima:", np.max(u))
+u_hist = data["u_hist"]   # array de snapshots de u
+v_hist = data["v_hist"]   # array de snapshots de v
+
+print("Tamaño de u_hist:", u_hist.shape)  # (num_snapshots, ny, nx)
+print("Velocidad máxima en la simulación:", np.max(u_hist))
